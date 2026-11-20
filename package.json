@@ -1,0 +1,16 @@
+{
+  "name": "vdra-web",
+  "version": "1.0.0",
+  "description": "VDra Web - VALORANT agent draft (multi-player, real-time)",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
