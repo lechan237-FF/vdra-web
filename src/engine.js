@@ -376,19 +376,18 @@ function shuffle(arr, random) {
   return arr;
 }
 
-// Random map ban/pick order with fixed per-team counts. Each pick is followed by a side choice of the other team.
-export function buildMapSteps(series, random = Math.random) {
-  const ops = [];
-  for (const t of TEAMS) {
-    const o = SERIES[series].ops[t];
-    for (let k = 0; k < o.ban; k++) ops.push({ type: 'ban', team: t });
-    for (let k = 0; k < o.pick; k++) ops.push({ type: 'pick', team: t });
-  }
-  shuffle(ops, random);
+// Fixed map ban/pick order ({} = Ban, [] = Pick, D = Decider):
+//   Bo3: {A}{B}[A][B]{A}{B}[D]      Bo5: {A}{B}[A][B][A][B][D]
+// Right after each pick, the team that did NOT pick chooses the starting side of that map.
+export const MAP_ORDER = {
+  bo3: [['ban', 'A'], ['ban', 'B'], ['pick', 'A'], ['pick', 'B'], ['ban', 'A'], ['ban', 'B']],
+  bo5: [['ban', 'A'], ['ban', 'B'], ['pick', 'A'], ['pick', 'B'], ['pick', 'A'], ['pick', 'B']],
+};
+export function buildMapSteps(series) {
   const steps = [];
-  for (const op of ops) {
-    steps.push({ i: steps.length, ...op });
-    if (op.type === 'pick') steps.push({ i: steps.length, type: 'side', team: other(op.team) });
+  for (const [type, team] of MAP_ORDER[series]) {
+    steps.push({ i: steps.length, type, team });
+    if (type === 'pick') steps.push({ i: steps.length, type: 'side', team: other(team) });
   }
   return steps;
 }
@@ -464,7 +463,7 @@ function startMatch(room, ctx) {
     finishedAt: null,
   };
   if (s.mode === 'map') {
-    m.mapDraft = { pool, steps: buildMapSteps(s.series, ctx.random || Math.random), stepIndex: 0, actions: [], maps: [] };
+    m.mapDraft = { pool, steps: buildMapSteps(s.series), stepIndex: 0, actions: [], maps: [] };
   } else {
     m.games = [newGame(m, 0, null)];
     m.games[0].startedAt = now;

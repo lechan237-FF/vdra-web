@@ -28,7 +28,9 @@ GitHubにアップロードするのは `public/` `src/` `test/` `server.js` `pa
    - エージェント Global Ban
    - マップ Global Ban(残りが7マップになるまで)
 2. Map + Agent の場合はマップドラフトを行います
-   - 7マップでBan/Pickを行い、各チームの回数は固定、順番は毎回ランダムです(Bo3:各チームBan2・Pick1、Bo5:各チームBan1・Pick2)
+   - 7マップで次の固定順にBan `{}` / Pick `[]` を行います
+     - Bo3:`{A}{B}[A][B]{A}{B}[Decider]`
+     - Bo5:`{A}{B}[A][B][A][B][Decider]`
    - マップをPickした直後に、Pickしていないチームが攻守を選びます
    - 最後に残ったマップがDeciderで、攻守はランダムで決まります
 3. マップごとにエージェントドラフトを行います

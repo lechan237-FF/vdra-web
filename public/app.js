@@ -980,9 +980,24 @@ function openMapGlobalBan() {
 }
 
 // ------------------------------------------------------------------ shared draft chrome
-function seriesBar() {
+function seriesBar(compact = false) {
   const m = S.room.match;
   if (m.mode !== 'map') return '';
+  if (compact) {
+    const maps = m.mapDraft.maps;
+    return `<div class="series-strip"><span class="ss-title">${esc(m.series.toUpperCase())}</span>${maps
+      .map((mp, i) => {
+        const cur = m.gameIndex === i;
+        const done = m.games[i]?.finishedAt;
+        return `<span class="ss-cell ${cur ? 'current' : ''} ${done ? 'done' : ''}">
+          <b>${i + 1}</b><span class="ss-name">${esc(mapName(mp.mapId))}</span>
+          ${mp.decider ? '<i class="tag tag-decider">D</i>' : `<i class="tag team-tag-${mp.pickedBy}">${mp.pickedBy}</i>`}
+          ${cur && mp.startSides ? `<i class="side-tag side-${mp.startSides.A}">A ${SIDE_EN[mp.startSides.A]}</i><i class="side-tag side-${mp.startSides.B}">B ${SIDE_EN[mp.startSides.B]}</i>` : ''}
+          ${done ? icon('pick') : ''}
+        </span>`;
+      })
+      .join('')}</span></div>`;
+  }
   const maps = m.mapDraft.maps;
   const total = S.series[m.series].games;
   const cells = Array.from({ length: total }, (_, i) => {
@@ -1023,9 +1038,9 @@ function phaseBanner(st, { mine, actorText }) {
   const sub =
     m.phase === 'map'
       ? `MAP DRAFT · STEP ${m.mapDraft.stepIndex + 1}/${m.mapDraft.steps.length}`
-      : `${esc(S.methodMap[m.method].name)}${m.mode === 'map' ? ` · MAP ${m.gameIndex + 1} ${esc(mapName(curGame(m)?.mapId))}` : ''} · STEP ${curGame(m).stepIndex + 1}/${curGame(m).steps.length}`;
+      : `${esc(S.methodMap[m.method].name)}${m.mode === 'map' ? ` · MAP ${m.gameIndex + 1}/${m.games.length} ${esc(mapName(curGame(m)?.mapId))}` : ''} · STEP ${curGame(m).stepIndex + 1}/${curGame(m).steps.length}`;
   return `
-    <section class="phase team-${st.team || 'AB'} type-${typeCls} ${paused ? 'is-paused' : ''} ${mine ? 'is-mine' : ''}">
+    <section class="phase team-${st.team || 'AB'} type-${typeCls} ${paused ? 'is-paused' : ''} ${mine ? 'is-mine' : ''} ${m.mode === 'map' && m.phase === 'agent' ? 'phase-compact' : ''}">
       <div class="phase-left">
         <div class="phase-sys">${sub}</div>
         <div class="phase-title"><span class="phase-ico">${icon(iconType)}</span><span>${teamTxt.split('：')[0]}</span><b>${title}</b></div>
@@ -1174,7 +1189,8 @@ function renderBetween() {
 function mountAgentDraft() {
   mount(
     'agent',
-    `<div id="series"></div>
+    `<div class="map-bg" id="map-bg" aria-hidden="true"></div>
+    <div id="series"></div>
     <div id="phase"></div>
     <div class="tracker-wrap"><div class="tracker" id="tracker"></div></div>
     <section class="draft-grid">
@@ -1339,7 +1355,15 @@ function updateAgentDraft() {
   const paused = room.status === 'paused';
   const actor = st.kind === 'seq' ? stepActor(room, st) : null;
 
-  $('#series').innerHTML = seriesBar();
+  $('#series').innerHTML = seriesBar(true);
+  const bg = $('#map-bg');
+  const mpImg = g.mapId ? S.mapMap[g.mapId]?.images?.splash || S.mapMap[g.mapId]?.images?.list : null;
+  if (bg && bg.dataset.map !== (g.mapId || '')) {
+    bg.dataset.map = g.mapId || '';
+    bg.style.backgroundImage = mpImg ? `url("${mpImg}")` : '';
+    bg.classList.toggle('on', !!mpImg);
+  }
+  $('#app').classList.toggle('has-series', m.mode === 'map');
   let actorText = '';
   if (st.kind === 'seq') actorText = `${esc(pname(actor))} が選択中`;
   else {
@@ -1543,6 +1567,7 @@ function renderSpotlight(id, { preview, st, actor }) {
     el.style.setProperty('--g2', cols[1]);
   }
   el.innerHTML = `
+    ${a.images?.icon ? `<img class="spot-face" src="${esc(a.images.icon)}" alt="" />` : ''}
     ${a.images?.background ? `<img class="spot-bgtext" src="${esc(a.images.background)}" alt="" />` : ''}
     <div class="spot-portrait ${changed ? 'enter' : ''}">${agentImg(a, 'portrait', 'portrait-img')}</div>
     <div class="spot-info">
@@ -1599,11 +1624,20 @@ function resultText(r) {
   return lines.join('\n');
 }
 
+function sideOf(g, t) {
+  return g.map?.startSides ? `<span class="side-tag side-${g.map.startSides[t]}">${SIDE_JA[g.map.startSides[t]]}</span>` : '';
+}
+const miniList = (type, ids) =>
+  ids.length
+    ? `<div class="side-list side-${type}"><span class="label">${icon(type)} ${TYPE_LABEL[type]}</span><div class="minis">${ids.map((id) => `<span class="mini mini-${type}" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}</div></div>`
+    : '';
+
+// One map: both teams side by side (Protect / Ban / Pick), sized to fit one screen.
 function gameHtml(r, g) {
   const teamBlock = (t) => {
     const T = g.teams[t];
     return `<div class="res-team team-${t}">
-      <div class="res-head"><span class="team-side">TEAM ${t}</span><h2>${esc(r.teamNames[t])}</h2>${g.map?.startSides ? `<span class="side-tag side-${g.map.startSides[t]}">${SIDE_JA[g.map.startSides[t]]}</span>` : ''}</div>
+      <div class="res-head"><span class="team-side">TEAM ${t}</span><h2>${esc(r.teamNames[t])}</h2>${sideOf(g, t)}</div>
       <div class="res-cards">${T.picks
         .map((p, i) => {
           const a = S.agentMap[p.agentId];
@@ -1614,16 +1648,82 @@ function gameHtml(r, g) {
           </div>`;
         })
         .join('')}</div>
-      <div class="res-extra">${['protect', 'ban']
-        .map((k) => (T[k + 's'].length ? `<div class="side-list side-${k}"><span class="label">${icon(k)} ${TYPE_LABEL[k]}</span><div class="minis">${T[k + 's'].map((id) => `<span class="mini mini-${k}" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}</div></div>` : ''))
-        .join('')}</div>
+      <div class="res-extra">${miniList('protect', T.protects)}${miniList('ban', T.bans)}</div>
     </div>`;
   };
   const head =
     r.mode === 'map'
-      ? `<div class="res-map-head">${mapImg(S.mapMap[g.mapId], 'list', 'res-map-img')}<div><span class="eyebrow">MAP ${g.index + 1}</span><h3>${esc(mapName(g.mapId))}</h3><span class="muted small">${g.map?.decider ? 'DECIDER(攻守ランダム)' : `TEAM ${g.map?.pickedBy} Pick / 攻守: TEAM ${g.map?.sideChooser} が選択`} · TEAM ${g.firstTeam} 先攻</span></div></div>`
+      ? `<div class="res-map-head" style="${S.mapMap[g.mapId]?.images?.list ? `--map:url('${esc(S.mapMap[g.mapId].images.list)}')` : ''}"><span class="eyebrow">MAP ${g.index + 1}</span><h3>${esc(mapName(g.mapId))}</h3><span class="muted small">${g.map?.decider ? 'DECIDER(攻守ランダム)' : `TEAM ${g.map?.pickedBy} Pick / 攻守: TEAM ${g.map?.sideChooser} が選択`} · TEAM ${g.firstTeam} 先攻</span></div>`
       : '';
-  return `${head}<section class="res-body">${teamBlock('A')}${teamBlock('B')}</section>`;
+  return `${head}<section class="res-body res-split">${teamBlock('A')}${teamBlock('B')}</section>`;
+}
+
+// Everything on one screen: map draft + every map with both teams' Protect / Ban / Pick.
+function overviewHtml(r) {
+  const methodName = r.method ? S.methodMap[r.method]?.name : r.legacyName || '';
+  const teamCell = (g, t) => {
+    const T = g.teams[t];
+    return `<div class="ov-team team-${t}">
+      <div class="ov-picks">${T.picks.map((p) => `<span class="ov-pick" title="${esc(agentName(p.agentId))}${p.player ? ' / ' + esc(p.player) : ''}">${agentImg(S.agentMap[p.agentId], 'icon')}<em>${esc(agentName(p.agentId))}</em></span>`).join('')}</div>
+      <div class="ov-sub">${T.protects.map((id) => `<span class="ov-mini prot" title="Protect ${esc(agentName(id))}">${icon('protect')}${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}${T.bans.map((id) => `<span class="ov-mini ban" title="Ban ${esc(agentName(id))}">${icon('ban')}${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}${sideOf(g, t)}</div>
+    </div>`;
+  };
+  return `
+    <div class="ov">
+      <header class="ov-head">
+        <div><b>${esc(methodName)}</b>${r.series ? ` · ${r.series.toUpperCase()}` : ''} · ${new Date(r.finishedAt || Date.now()).toLocaleString('ja-JP')}</div>
+        <div class="ov-teams"><span class="team-side team-A">TEAM A</span><b>${esc(r.teamNames.A)}</b><span class="ov-vs">VS</span><b>${esc(r.teamNames.B)}</b><span class="team-side team-B">TEAM B</span></div>
+        <button class="btn btn-ghost btn-sm" data-ov-close>閉じる ✕</button>
+      </header>
+      ${
+        r.agentGlobalBans.length || r.mapGlobalBans.length
+          ? `<div class="ov-gb">${icon('global')} GLOBAL BAN ${r.agentGlobalBans.map((id) => `<span class="ov-mini ban" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}${r.mapGlobalBans.map((id) => `<span class="tag">${esc(mapName(id))}</span>`).join('')}</div>`
+          : ''
+      }
+      ${
+        r.mapDraft
+          ? `<div class="ov-mapdraft">${r.mapDraft.log
+              .filter((a) => a.type !== 'side')
+              .map((a) => `<span class="ov-md ${a.type} team-${a.team}">${icon(a.type)}${a.team} ${esc(mapName(a.mapId))}</span>`)
+              .join('')}<span class="ov-md decider">D ${esc(mapName(r.mapDraft.maps.at(-1).mapId))}</span></div>`
+          : ''
+      }
+      <div class="ov-grid" style="--rows:${r.games.length}">
+        ${r.games
+          .map(
+            (g, i) => `<div class="ov-row">
+          <div class="ov-map" style="${g.mapId && S.mapMap[g.mapId]?.images?.list ? `--map:url('${esc(S.mapMap[g.mapId].images.list)}')` : ''}">
+            <span class="ov-no">${r.mode === 'map' ? `MAP ${i + 1}` : 'DRAFT'}</span>
+            <b>${g.mapId ? esc(mapName(g.mapId)) : ''}</b>
+            ${g.map ? `<span class="small">${g.map.decider ? 'DECIDER' : `${g.map.pickedBy} PICK`} · ${g.firstTeam}先攻</span>` : ''}
+          </div>
+          ${teamCell(g, 'A')}${teamCell(g, 'B')}
+        </div>`
+          )
+          .join('')}
+      </div>
+    </div>`;
+}
+
+function openOverview(r) {
+  const el = document.createElement('div');
+  el.className = 'ov-layer';
+  el.innerHTML = overviewHtml(r);
+  document.body.appendChild(el);
+  document.body.classList.add('ov-open');
+  const close = () => {
+    el.remove();
+    document.body.classList.remove('ov-open');
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => e.key === 'Escape' && close();
+  document.addEventListener('keydown', onKey);
+  el.querySelector('[data-ov-close]').onclick = close;
+}
+
+function resultPane(r) {
+  if (r.mode !== 'map') return gameHtml(r, r.games[0]);
+  return S.resultTab === 0 ? mapDraftResultHtml(r) : gameHtml(r, r.games[S.resultTab - 1]);
 }
 
 function resultHtml(r, { inRoom }) {
@@ -1634,21 +1734,24 @@ function resultHtml(r, { inRoom }) {
   const fearless = r.method && S.methodMap[r.method]?.fearless;
   return `
     <section class="res-top">
-      <div>
-        <p class="eyebrow">// ${esc(methodName)}${r.series ? ' · ' + r.series.toUpperCase() : ''}${r.counts?.order && S.methodMap[r.method]?.usesOrder ? ' · ' + r.counts.order.toUpperCase() : ''} · ${date.toLocaleString('ja-JP')}</p>
-        <h1 class="h-display">DRAFT <span class="accent">COMPLETE</span></h1>
+      <div class="res-title">
+        <h1>DRAFT <span class="accent">COMPLETE</span></h1>
+        <span class="muted small">${esc(methodName)}${r.series ? ' · ' + r.series.toUpperCase() : ''}${r.counts?.order && S.methodMap[r.method]?.usesOrder ? ' · ' + r.counts.order.toUpperCase() : ''} · ${date.toLocaleString('ja-JP')}</span>
       </div>
       <div class="res-actions">
+        <button class="btn btn-red btn-sm" data-r="all">全結果を一画面で表示</button>
         ${r.id ? `<button class="btn btn-light btn-sm" data-r="link">結果URLをコピー</button>` : ''}
-        <button class="btn btn-ghost btn-sm" data-r="text">テキストでコピー</button>
-        <button class="btn btn-ghost btn-sm" data-r="json">JSONで保存</button>
-        ${inRoom && isHost() ? '<button class="btn btn-red btn-cut btn-sm" data-r="lobby">ロビーに戻る</button>' : ''}
-        ${inRoom ? '<button class="btn btn-ghost btn-sm" data-r="leave">退出</button>' : '<a class="btn btn-red btn-cut btn-sm" href="/" data-link>新しくルームを作る</a>'}
+        <button class="btn btn-ghost btn-sm" data-r="text">テキスト</button>
+        <button class="btn btn-ghost btn-sm" data-r="json">JSON</button>
+        ${inRoom && isHost() ? '<button class="btn btn-ghost btn-sm" data-r="lobby">ロビーに戻る</button>' : ''}
+        ${inRoom ? '<button class="btn btn-ghost btn-sm" data-r="leave">退出</button>' : '<a class="btn btn-ghost btn-sm" href="/" data-link>新しくルームを作る</a>'}
       </div>
     </section>
-    ${r.agentGlobalBans.length ? `<div class="gbans res-gbans"><span class="label">${icon('global')} AGENT GLOBAL BAN</span>${r.agentGlobalBans.map((id) => `<span class="mini mini-ban" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}</div>` : ''}
-    ${tabs ? `<nav class="res-tabs">${tabs.map((t, i) => `<button class="res-tab ${i === S.resultTab ? 'on' : ''}" data-tab="${i}">${esc(t)}</button>`).join('')}</nav>` : ''}
-    <div id="res-pane">${tabs ? (S.resultTab === 0 ? mapDraftResultHtml(r) : gameHtml(r, r.games[S.resultTab - 1])) : gameHtml(r, r.games[0])}</div>
+    <div class="res-bar">
+      ${tabs ? `<nav class="res-tabs">${tabs.map((t, i) => `<button class="res-tab ${i === S.resultTab ? 'on' : ''}" data-tab="${i}">${esc(t)}</button>`).join('')}</nav>` : '<span></span>'}
+      ${r.agentGlobalBans.length ? `<div class="gbans res-gbans"><span class="label">${icon('global')} GLOBAL BAN</span>${r.agentGlobalBans.map((id) => `<span class="mini mini-ban" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}</div>` : ''}
+    </div>
+    <div id="res-pane">${resultPane(r)}</div>
     ${fearless ? fearlessHtml(r) : ''}
     ${inRoom && !isHost() ? '<p class="muted small center">ホストがロビーに戻すと、次のドラフトを始められます。</p>' : ''}`;
 }
@@ -1701,12 +1804,13 @@ function bindResult(r) {
   });
   on('lobby', () => act({ type: 'backToLobby' }));
   on('leave', leaveRoom);
+  on('all', () => openOverview(r));
   $$('[data-tab]', app).forEach(
     (b) =>
       (b.onclick = () => {
         S.resultTab = Number(b.dataset.tab);
         $$('[data-tab]', app).forEach((x) => x.classList.toggle('on', x === b));
-        $('#res-pane').innerHTML = S.resultTab === 0 ? mapDraftResultHtml(r) : gameHtml(r, r.games[S.resultTab - 1]);
+        $('#res-pane').innerHTML = resultPane(r);
       })
   );
 }

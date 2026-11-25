@@ -294,25 +294,10 @@ test('Fearless is Bo3/Bo5 only', () => {
 
 // ---------------------------------------------------------------- map draft
 
-test('map steps: per-team counts fixed, random order, side choice by the other team after each pick', () => {
-  const orders = new Set();
-  for (let seed = 0; seed < 40; seed++) {
-    for (const [series, ban, pick] of [['bo3', 2, 1], ['bo5', 1, 2]]) {
-      const steps = buildMapSteps(series);
-      for (const team of ['A', 'B']) {
-        assert.equal(steps.filter((s) => s.type === 'ban' && s.team === team).length, ban);
-        assert.equal(steps.filter((s) => s.type === 'pick' && s.team === team).length, pick);
-      }
-      steps.forEach((s, i) => {
-        if (s.type === 'pick') {
-          assert.equal(steps[i + 1].type, 'side');
-          assert.notEqual(steps[i + 1].team, s.team);
-        }
-      });
-      if (series === 'bo3') orders.add(steps.map((s) => s.type[0] + s.team).join(''));
-    }
-  }
-  assert.ok(orders.size > 5, 'order should vary');
+test('map steps follow the fixed order; side choice by the other team after each pick', () => {
+  const fmt = (series) => buildMapSteps(series).map((s) => (s.type === 'ban' ? `{${s.team}}` : s.type === 'pick' ? `[${s.team}]` : `(side ${s.team})`)).join('');
+  assert.equal(fmt('bo3'), '{A}{B}[A](side B)[B](side A){A}{B}');
+  assert.equal(fmt('bo5'), '{A}{B}[A](side B)[B](side A)[A](side B)[B](side A)');
 });
 
 test('map draft Bo3: needs exactly 7 maps, no duplicates, decider with random sides, 3 games with alternating first team', () => {
