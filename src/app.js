@@ -9,16 +9,22 @@ import { fileURLToPath } from 'node:url';
 
 import { Store } from './db.js';
 import { AgentStore } from './agents.js';
-import { publicSystems } from './systems.js';
+import { MapStore, SERIES_POOL } from './maps.js';
+import { publicMethods, COUNT_SETTINGS, MAX_AGENT_GLOBAL_BANS } from './methods.js';
 import {
   ActionError,
   applyAction,
   addPlayer,
-  autoSelect,
+  autoResolve,
   buildResult,
   createRoom,
-  publicRoom,
+  migrateRoom,
+  transferHostIfOffline,
+  viewFor,
   MAX_PLAYERS,
+  SERIES,
+  DEFAULT_TEAM_NAMES,
+  BETWEEN_MS,
 } from './engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,7 +72,9 @@ export async function createApp({
   fs.mkdirSync(dataDir, { recursive: true });
   const store = new Store(dbFile || path.join(dataDir, 'vdra.db'));
   const agents = new AgentStore(dataDir, { offline, log });
-  await agents.init();
+  const maps = new MapStore(dataDir, { offline, log });
+  await Promise.all([agents.init(), maps.init()]);
+  const ctxBase = () => ({ now: clock(), agentIds: agents.ids, mapIds: maps.ids });
 
   /** @type {Map<string, {room:any, tokens:Record<string,string>, clients:Set<any>, conn:Map<string,number>, offlineTimers:Map<string,any>, timer:any, recent:Map<string,any>}>} */
   const rooms = new Map();
@@ -79,17 +87,19 @@ export async function createApp({
     offlineTimers: new Map(),
     timer: null,
     recent: new Map(),
+    offlineSince: new Map(),
   });
 
   // ------------------------------------------------------------ restore
   for (const { room, tokens } of store.loadRooms()) {
+    migrateRoom(room); // rooms saved by the previous version
     for (const p of Object.values(room.players)) p.online = false;
     const entry = makeEntry(room, tokens);
+    for (const pid of Object.keys(room.players)) entry.offlineSince.set(pid, clock());
     rooms.set(room.id, entry);
-    if (room.status === 'drafting' && room.draft?.timer > 0 && !room.draft.deadline) {
-      room.draft.deadline = clock() + room.draft.timer * 1000;
-    }
     schedule(entry); // overdue deadlines resolve immediately
+    // give everyone a moment to reconnect, then make sure the host is someone online
+    setTimeout(() => checkHost(entry), OFFLINE_GRACE_MS + 2000).unref?.();
   }
   if (rooms.size) log.info?.(`[rooms] restored ${rooms.size} room(s) from database`);
 
@@ -106,15 +116,44 @@ export async function createApp({
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
+  // Each client receives the view of its own team: hidden (blind) selections of the
+  // other team never leave the server.
   function broadcast(entry) {
-    const payload = publicRoom(entry.room, clock());
-    const msg = `event: state\ndata: ${JSON.stringify(payload)}\n\n`;
-    for (const c of entry.clients) c.res.write(msg);
+    const now = clock();
+    const cache = {};
+    for (const c of entry.clients) {
+      const team = entry.room.players[c.pid]?.team ?? 'S';
+      cache[team] ||= `event: state\ndata: ${JSON.stringify(viewFor(entry.room, team === 'S' ? null : team, now))}\n\n`;
+      c.res.write(cache[team]);
+    }
+  }
+
+  function checkHost(entry) {
+    if (!rooms.has(entry.room.id)) return;
+    const hid = entry.room.hostId;
+    const h = entry.room.players[hid];
+    if (h && h.online) return;
+    if (clock() - (entry.offlineSince.get(hid) ?? 0) < OFFLINE_GRACE_MS) return;
+    if (transferHostIfOffline(entry.room, clock())) {
+      persist(entry);
+      broadcast(entry);
+    }
+  }
+
+  function deleteRoom(entry) {
+    clearTimeout(entry.timer);
+    for (const c of [...entry.clients]) {
+      send(c.res, 'left', { deleted: true });
+      c.res.end();
+    }
+    entry.clients.clear();
+    rooms.delete(entry.room.id);
+    store.deleteRoom(entry.room.id);
   }
 
   function finalizeIfFinished(entry) {
     const room = entry.room;
-    if (room.status !== 'finished' || room.resultId || !room.draft) return;
+    if (room.status !== 'finished' || room.resultId || !room.match) return;
     const id = randId(10);
     const result = buildResult(room, { id, now: clock() });
     store.saveResult(result);
@@ -126,16 +165,16 @@ export async function createApp({
     clearTimeout(entry.timer);
     entry.timer = null;
     const { room } = entry;
-    if (room.status !== 'drafting' || !room.draft?.deadline) return;
-    const stepAtSchedule = room.draft.stepIndex;
-    const delay = Math.max(0, room.draft.deadline - clock() + TIMER_GRACE_MS);
+    if (room.status !== 'drafting' || !room.match?.deadline) return;
+    const deadline = room.match.deadline;
+    const delay = Math.max(0, deadline - clock() + TIMER_GRACE_MS);
     entry.timer = setTimeout(() => {
       if (!rooms.has(room.id)) return;
-      if (room.status !== 'drafting' || room.draft?.stepIndex !== stepAtSchedule) return schedule(entry);
+      if (room.status !== 'drafting' || room.match?.deadline !== deadline) return schedule(entry);
       try {
-        autoSelect(room, agents.ids, { now: clock() });
+        autoResolve(room, ctxBase());
       } catch (e) {
-        log.error?.('[timer] autoSelect failed', e);
+        log.error?.('[timer] autoResolve failed', e);
       }
       finalizeIfFinished(entry);
       persist(entry);
@@ -149,6 +188,9 @@ export async function createApp({
     const p = entry.room.players[pid];
     if (!p || p.online === online) return;
     p.online = online;
+    if (!online) entry.offlineSince.set(pid, clock());
+    // The host role moves as soon as the host is disconnected (after the short reload grace).
+    if (!online && entry.room.hostId === pid && transferHostIfOffline(entry.room, clock())) persist(entry);
     broadcast(entry);
   }
 
@@ -249,6 +291,7 @@ export async function createApp({
     clearTimeout(entry.offlineTimers.get(pid));
     const p = entry.room.players[pid];
     if (p && !p.online) p.online = true;
+    checkHost(entry); // a host that stayed offline is replaced by someone who is here
     broadcast(entry); // also delivers the initial state to this client
 
     const hb = setInterval(() => res.write(`: hb ${clock()}\n\n`), HEARTBEAT_MS);
@@ -274,7 +317,7 @@ export async function createApp({
   function kickClients(entry, pid) {
     for (const c of [...entry.clients]) {
       if (c.pid === pid) {
-        send(c.res, 'kicked', {});
+        send(c.res, 'left', {});
         c.res.end();
         entry.clients.delete(c);
       }
@@ -290,9 +333,19 @@ export async function createApp({
     // Generous per-IP limit (players behind one router share an IP); a tighter per-player limit is applied to actions.
     if (m === 'POST' && !rateOk(ip, 'post', limits.ipPerSec, 1000)) return err(res, 429, 'RATE', '操作が多すぎます。少し待ってください');
 
-    if (parts[1] === 'health') return json(res, 200, { ok: true, rooms: rooms.size, agents: agents.ids.length });
+    if (parts[1] === 'health') return json(res, 200, { ok: true, rooms: rooms.size, agents: agents.ids.length, maps: maps.ids.length });
+    if (parts[1] === 'maps' && m === 'GET') return json(res, 200, maps.publicData());
     if (parts[1] === 'agents' && m === 'GET') return json(res, 200, agents.publicData());
-    if (parts[1] === 'systems' && m === 'GET') return json(res, 200, { systems: publicSystems() });
+    if (parts[1] === 'methods' && m === 'GET')
+      return json(res, 200, {
+        methods: publicMethods(),
+        countSettings: COUNT_SETTINGS,
+        series: SERIES,
+        pool: SERIES_POOL,
+        defaultTeamNames: DEFAULT_TEAM_NAMES,
+        maxAgentGlobalBans: MAX_AGENT_GLOBAL_BANS,
+        betweenMs: BETWEEN_MS,
+      });
 
     if (parts[1] === 'results' && parts[2] && m === 'GET') {
       const r = store.getResult(parts[2]);
@@ -371,21 +424,22 @@ export async function createApp({
 
       // Node runs this synchronously: actions on one room are naturally serialized,
       // so two simultaneous clicks can never both apply to the same step.
-      const r = applyAction(room, pid, action, { now: clock(), agentIds: agents.ids });
+      const r = applyAction(room, pid, action, ctxBase());
+      if (r.deleteRoom) {
+        deleteRoom(entry);
+        return json(res, 200, { ok: true, deleted: true });
+      }
       if (r.changed) {
         if (!r.light) {
           finalizeIfFinished(entry);
           persist(entry);
           schedule(entry);
         }
-        if (r.kicked) {
-          delete entry.tokens[r.kicked];
-          kickClients(entry, r.kicked);
-          persist(entry);
-        }
-        if (action?.type === 'leave') {
-          delete entry.tokens[pid];
-          kickClients(entry, pid);
+        if (r.removed) {
+          // kicked or left: credentials are revoked and their streams closed
+          delete entry.tokens[r.removed];
+          entry.offlineSince.delete(r.removed);
+          kickClients(entry, r.removed);
           persist(entry);
         }
         broadcast(entry);
@@ -435,11 +489,12 @@ export async function createApp({
       persist(entry);
     }
     clearInterval(agents.timer);
+    clearInterval(maps.timer);
     await new Promise((r) => server.close(r));
     server.closeAllConnections?.();
     store.close();
   }
 
   const reschedule = (id) => rooms.has(id) && schedule(rooms.get(id));
-  return { server, port: actualPort, rooms, store, agents, close, reschedule };
+  return { server, port: actualPort, rooms, store, agents, maps, close, reschedule };
 }
