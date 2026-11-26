@@ -12,8 +12,8 @@ const TYPE_LABEL = { protect: 'PROTECT', ban: 'BAN', pick: 'PICK' };
 const TYPE_JA = { protect: 'Protect', ban: 'Ban', pick: 'Pick' };
 const LOCK_LABEL = { protect: 'PROTECT', ban: 'BAN', pick: 'LOCK IN' };
 const STATUS_JA = { lobby: 'ロビー', drafting: 'ドラフト中', paused: '一時停止中', finished: '終了' };
-const SIDE_JA = { atk: '攻撃スタート', def: '防衛スタート' };
-const SIDE_EN = { atk: 'ATK', def: 'DEF' };
+const SIDE_JA = { atk: 'ATTACK START', def: 'DEFENSE START' };
+const SIDE_EN = { atk: 'ATTACK', def: 'DEFENSE' };
 const NAME_PH = { A: '例：VORTEX', B: '例：OBSIDIAN' };
 
 // ---- icons (shared by every screen)
@@ -528,7 +528,7 @@ function renderTopbar() {
     return;
   }
   const me = S.room.players[S.me?.pid];
-  const lobby = S.room.status === 'lobby';
+  const lobby = S.room.status === 'lobby' || (S.room.status === 'finished' && S.localLobby);
   el.innerHTML = `
     ${
       lobby
@@ -549,10 +549,20 @@ function renderTopbar() {
 }
 const inviteUrl = () => `${location.origin}/room/${S.room.id}`;
 
+function setPov() {
+  const drafting = S.room && (S.room.status === 'drafting' || S.room.status === 'paused');
+  const t = drafting ? myTeam() : null;
+  document.body.classList.toggle('pov-A', t === 'A');
+  document.body.classList.toggle('pov-B', t === 'B');
+}
+
 function render(prev) {
+  if (S.room && S.room.status !== 'finished') S.localLobby = false;
   renderTopbar();
+  setPov();
   if (!S.room) return;
   const st = S.room.status;
+  if (st === 'finished' && S.localLobby) return renderLobby();
   if (st === 'lobby') return renderLobby();
   if (st === 'finished') return renderRoomResult();
   const m = S.room.match;
@@ -712,7 +722,14 @@ function renderLobby() {
   const me = room.players[S.me.pid];
   const spectators = Object.values(room.players).filter((p) => !p.team).sort((a, b) => a.joinedAt - b.joinedAt);
   const mapNeed = s.mode === 'map' ? S.maps.length - S.pool - s.mapGlobalBans.length : 0;
-  const startBlock = !room.order.A.length || !room.order.B.length ? '両チームに1人以上必要です' : mapNeed > 0 ? `マップのGlobal Banをあと${mapNeed}個選んでください` : '';
+  const ready = room.ready || { A: false, B: false };
+  const startBlock = !room.order.A.length || !room.order.B.length
+    ? '両チームに1人以上必要です'
+    : mapNeed > 0
+      ? `マップのGlobal Banをあと${mapNeed}個選んでください`
+      : !ready.A || !ready.B
+        ? `両チームのキャプテンのREADY待ち(A ${ready.A ? '✓' : '—'} / B ${ready.B ? '✓' : '—'})`
+        : '';
   const cap = globalBanCap(s);
 
   const playerRow = (p, idx, team) => `
@@ -749,6 +766,11 @@ function renderLobby() {
         <span class="team-count">${list.length}/5</span>
       </div>
       <ol class="pl-list">${list.map((p, i) => playerRow(p, i, t)).join('')}${empty}</ol>
+      ${
+        room.order[t][0] === S.me.pid
+          ? `<button class="btn btn-sm ready-btn ${ready[t] ? 'is-ready' : ''}" data-ready="${ready[t] ? '0' : '1'}">${ready[t] ? `${icon('pick')} READY(押すと解除)` : 'READY'}</button>`
+          : `<div class="ready-state ${ready[t] ? 'is-ready' : ''}">${ready[t] ? `${icon('pick')} READY` : list.length ? 'キャプテンのREADY待ち' : ''}</div>`
+      }
       ${me.team !== t ? `<button class="btn btn-sm btn-team btn-team-${t}" data-join="${t}" ${list.length >= 5 ? 'disabled' : ''}>TEAM ${t} に入る</button>` : `<button class="btn btn-sm btn-ghost" data-join="">観戦に移る</button>`}
     </div>`;
   };
@@ -832,6 +854,7 @@ function renderLobby() {
         <div class="action-row">
           ${host ? `<button class="btn btn-ghost act-btn" data-shuffle>${icon('shuffle')}ランダムでチーム分け</button>` : ''}
           ${host ? `<button class="btn btn-red btn-cut act-btn btn-start" data-start ${startBlock ? 'disabled' : ''} title="${esc(startBlock)}">START DRAFT</button>` : `<div class="waiting act-btn"><span class="pulse"></span>ホストの開始を待っています</div>`}
+          ${room.status === 'finished' ? `<button class="btn btn-ghost act-btn" data-back-result>結果に戻る</button>` : ''}
           <button class="btn btn-ghost act-btn btn-leave" data-leave>${icon('exit')}退出</button>
           ${host && startBlock ? `<span class="muted small start-hint">${esc(startBlock)}</span>` : ''}
         </div>
@@ -888,6 +911,13 @@ function renderLobby() {
       act({ type: 'setTeamName', team: el.dataset.teamName, name: el.value });
     };
   });
+  $$('[data-ready]', app).forEach((b) => (b.onclick = () => act({ type: 'setReady', ready: b.dataset.ready === '1' })));
+  const backRes = app.querySelector('[data-back-result]');
+  if (backRes)
+    backRes.onclick = () => {
+      S.localLobby = false;
+      render();
+    };
   const sh = app.querySelector('[data-shuffle]');
   if (sh) sh.onclick = () => act({ type: 'shuffleTeams' });
   const st = app.querySelector('[data-start]');
@@ -895,13 +925,23 @@ function renderLobby() {
   $$('[data-gb]', app).forEach((b) => (b.onclick = () => (b.dataset.gb === 'agent' ? openAgentGlobalBan() : openMapGlobalBan())));
   const rn = $('#rename');
   if (rn) {
-    rn.onkeydown = (e) => e.key === 'Enter' && rn.blur();
-    rn.onchange = () => {
+    const commit = () => {
+      if (!rn.isConnected) return; // replaced by a re-render while typing: the new input keeps the text
       const n = rn.value.trim();
-      if (!n) return (rn.value = me.name);
+      const cur = S.room.players[S.me.pid]?.name;
+      if (!n) return (rn.value = cur || '');
+      if (n === cur) return;
       saveName(n);
       act({ type: 'rename', name: n });
     };
+    rn.onkeydown = (e) => {
+      if (e.key === 'Enter') rn.blur();
+      if (e.key === 'Escape') {
+        rn.value = S.room.players[S.me.pid]?.name || '';
+        rn.blur();
+      }
+    };
+    rn.onblur = commit;
   }
   app.querySelector('[data-leave]').onclick = leaveRoom;
 }
@@ -1013,6 +1053,28 @@ function seriesBar(compact = false) {
   return `<div class="series-bar"><span class="sb-title">${esc(m.series.toUpperCase())}</span>${cells}</div>`;
 }
 
+function centerTracker() {
+  const tr = $('#tracker');
+  const cur = tr?.querySelector('.current');
+  const box = tr?.parentElement;
+  if (!cur || !box) return;
+  box.scrollLeft = cur.offsetLeft - box.clientWidth / 2 + cur.offsetWidth / 2;
+}
+
+// Current map + starting sides, shown prominently during the agent draft of a series.
+function mapBadge() {
+  const m = S.room.match;
+  const g = curGame(m);
+  if (!g?.mapId) return '';
+  const mp = m.mapDraft?.maps[m.gameIndex];
+  const img = S.mapMap[g.mapId]?.images?.list;
+  return `<div class="phase-map" style="${img ? `--map:url('${esc(img)}')` : ''}">
+    <span class="pm-no">MAP ${m.gameIndex + 1}/${m.games.length}${mp?.decider ? ' · DECIDER' : ''}</span>
+    <b class="pm-name">${esc(mapName(g.mapId))}</b>
+    ${mp?.startSides ? `<span class="pm-sides"><i class="side-tag side-${mp.startSides.A}">A ${SIDE_EN[mp.startSides.A]}</i><i class="side-tag side-${mp.startSides.B}">B ${SIDE_EN[mp.startSides.B]}</i></span>` : ''}
+  </div>`;
+}
+
 function phaseBanner(st, { mine, actorText }) {
   const room = S.room;
   const m = room.match;
@@ -1041,10 +1103,12 @@ function phaseBanner(st, { mine, actorText }) {
       : `${esc(S.methodMap[m.method].name)}${m.mode === 'map' ? ` · MAP ${m.gameIndex + 1}/${m.games.length} ${esc(mapName(curGame(m)?.mapId))}` : ''} · STEP ${curGame(m).stepIndex + 1}/${curGame(m).steps.length}`;
   return `
     <section class="phase team-${st.team || 'AB'} type-${typeCls} ${paused ? 'is-paused' : ''} ${mine ? 'is-mine' : ''} ${m.mode === 'map' && m.phase === 'agent' ? 'phase-compact' : ''}">
+      ${m.phase === 'agent' ? mapBadge() : ''}
       <div class="phase-left">
         <div class="phase-sys">${sub}</div>
         <div class="phase-title"><span class="phase-ico">${icon(iconType)}</span><span>${teamTxt.split('：')[0]}</span><b>${title}</b></div>
       </div>
+      <div class="phase-mid"><div class="tracker" id="tracker"></div></div>
       <div class="phase-turn">
         <div class="phase-team">${st.kind === 'sim' ? `${icon('hidden')} 相手の選択は公開まで見えません` : teamTxt.split('：')[1] || ''}</div>
         <div class="phase-actor">${mine ? '<b class="your-turn">YOUR TURN</b>' : actorText}</div>
@@ -1087,7 +1151,7 @@ function renderMapDraft() {
   const mine = canActStep(room, S.me.pid, st);
   const actor = stepActor(room, st);
   if (S.view !== 'map') {
-    mount('map', `<div id="series"></div><div id="phase"></div><div class="tracker-wrap"><div class="tracker" id="tracker"></div></div><section class="map-stage" id="map-stage"></section><div class="lock-bar" id="lock-bar"></div><section class="draft-foot" id="draft-foot"></section>`);
+    mount('map', `<div id="series"></div><div id="phase"></div><section class="map-stage" id="map-stage"></section><div class="lock-bar" id="lock-bar"></div><section class="draft-foot" id="draft-foot"></section>`);
   }
   $('#series').innerHTML = seriesBar();
   $('#phase').innerHTML = phaseBanner(st, { mine, actorText: `${esc(pname(actor))} が選択中` });
@@ -1098,6 +1162,7 @@ function renderMapDraft() {
       return chip({ type: s.type === 'side' ? 'side' : s.type, team: s.team }, { done: i < md.stepIndex, current: i === md.stepIndex, title });
     })
     .join('');
+  centerTracker();
   const state = {};
   for (const a of md.actions) if (a.type !== 'side') state[a.mapId] = a;
   const preview = m.preview?.key === st.key ? m.preview.mapId : null;
@@ -1192,7 +1257,6 @@ function mountAgentDraft() {
     `<div class="map-bg" id="map-bg" aria-hidden="true"></div>
     <div id="series"></div>
     <div id="phase"></div>
-    <div class="tracker-wrap"><div class="tracker" id="tracker"></div></div>
     <section class="draft-grid">
       <aside class="team-panel team-A" id="team-A"></aside>
       <div class="stage">
@@ -1291,6 +1355,7 @@ function onTileClick(id) {
     const err = tileError(id, team);
     if (err) toast(`${agentName(id)}: ${err}`, 'error', 1600);
     else if (st.kind === 'seq') act({ type: 'preview', id }, { quiet: true });
+    else if (st.kind === 'sim') act({ type: 'simPreview', key: st.key, team, slot: st.type === 'pick' ? simSlotFor(team) : null, agentId: id }, { quiet: true });
   }
   updateAgentDraft();
 }
@@ -1329,7 +1394,8 @@ async function lockIn(id) {
 
 function applyFilter() {
   const { role, q, only } = S.filter;
-  const team = actingTeam();
+  const st = curStep();
+  const team = actingTeam() || (st?.kind === 'seq' ? (myTeam() || st.team) : myTeam());
   $$('#agent-grid .tile').forEach((t) => {
     const a = S.agentMap[t.dataset.agent];
     let show = (role === 'all' || a.role === role) && (!q || a.name.toLowerCase().includes(q) || (a.nameJa || '').toLowerCase().includes(q));
@@ -1380,8 +1446,7 @@ function updateAgentDraft() {
       return chip(s, { done: i < g.stepIndex, current: i === g.stepIndex, agent: a?.agentId ? S.agentMap[a.agentId] : null, title });
     })
     .join('');
-  const cur = $('#tracker .current');
-  if (cur) cur.scrollIntoView({ block: 'nearest', inline: 'center' });
+  centerTracker();
 
   for (const t of ['A', 'B']) $(`#team-${t}`).innerHTML = teamPanel(t, st, g);
   $$('.slot[data-slot]').forEach(
@@ -1658,121 +1723,38 @@ function gameHtml(r, g) {
   return `${head}<section class="res-body res-split">${teamBlock('A')}${teamBlock('B')}</section>`;
 }
 
-// Everything on one screen: map draft + every map with both teams' Protect / Ban / Pick.
-function overviewHtml(r) {
-  const methodName = r.method ? S.methodMap[r.method]?.name : r.legacyName || '';
-  const teamCell = (g, t) => {
-    const T = g.teams[t];
-    return `<div class="ov-team team-${t}">
-      <div class="ov-picks">${T.picks.map((p) => `<span class="ov-pick" title="${esc(agentName(p.agentId))}${p.player ? ' / ' + esc(p.player) : ''}">${agentImg(S.agentMap[p.agentId], 'icon')}<em>${esc(agentName(p.agentId))}</em></span>`).join('')}</div>
-      <div class="ov-sub">${T.protects.map((id) => `<span class="ov-mini prot" title="Protect ${esc(agentName(id))}">${icon('protect')}${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}${T.bans.map((id) => `<span class="ov-mini ban" title="Ban ${esc(agentName(id))}">${icon('ban')}${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}${sideOf(g, t)}</div>
-    </div>`;
-  };
-  return `
-    <div class="ov">
-      <header class="ov-head">
-        <div><b>${esc(methodName)}</b>${r.series ? ` · ${r.series.toUpperCase()}` : ''} · ${new Date(r.finishedAt || Date.now()).toLocaleString('ja-JP')}</div>
-        <div class="ov-teams"><span class="team-side team-A">TEAM A</span><b>${esc(r.teamNames.A)}</b><span class="ov-vs">VS</span><b>${esc(r.teamNames.B)}</b><span class="team-side team-B">TEAM B</span></div>
-        <button class="btn btn-ghost btn-sm" data-ov-close>閉じる ✕</button>
-      </header>
-      ${
-        r.agentGlobalBans.length || r.mapGlobalBans.length
-          ? `<div class="ov-gb">${icon('global')} GLOBAL BAN ${r.agentGlobalBans.map((id) => `<span class="ov-mini ban" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}${r.mapGlobalBans.map((id) => `<span class="tag">${esc(mapName(id))}</span>`).join('')}</div>`
-          : ''
-      }
-      ${
-        r.mapDraft
-          ? `<div class="ov-mapdraft">${r.mapDraft.log
-              .filter((a) => a.type !== 'side')
-              .map((a) => `<span class="ov-md ${a.type} team-${a.team}">${icon(a.type)}${a.team} ${esc(mapName(a.mapId))}</span>`)
-              .join('')}<span class="ov-md decider">D ${esc(mapName(r.mapDraft.maps.at(-1).mapId))}</span></div>`
-          : ''
-      }
-      <div class="ov-grid" style="--rows:${r.games.length}">
-        ${r.games
-          .map(
-            (g, i) => `<div class="ov-row">
-          <div class="ov-map" style="${g.mapId && S.mapMap[g.mapId]?.images?.list ? `--map:url('${esc(S.mapMap[g.mapId].images.list)}')` : ''}">
-            <span class="ov-no">${r.mode === 'map' ? `MAP ${i + 1}` : 'DRAFT'}</span>
-            <b>${g.mapId ? esc(mapName(g.mapId)) : ''}</b>
-            ${g.map ? `<span class="small">${g.map.decider ? 'DECIDER' : `${g.map.pickedBy} PICK`} · ${g.firstTeam}先攻</span>` : ''}
-          </div>
-          ${teamCell(g, 'A')}${teamCell(g, 'B')}
-        </div>`
-          )
-          .join('')}
-      </div>
-    </div>`;
-}
-
-function openOverview(r) {
-  const el = document.createElement('div');
-  el.className = 'ov-layer';
-  el.innerHTML = overviewHtml(r);
-  document.body.appendChild(el);
-  document.body.classList.add('ov-open');
-  const close = () => {
-    el.remove();
-    document.body.classList.remove('ov-open');
-    document.removeEventListener('keydown', onKey);
-  };
-  const onKey = (e) => e.key === 'Escape' && close();
-  document.addEventListener('keydown', onKey);
-  el.querySelector('[data-ov-close]').onclick = close;
-}
-
-function resultPane(r) {
-  if (r.mode !== 'map') return gameHtml(r, r.games[0]);
-  return S.resultTab === 0 ? mapDraftResultHtml(r) : gameHtml(r, r.games[S.resultTab - 1]);
-}
-
 function resultHtml(r, { inRoom }) {
   const date = new Date(r.finishedAt || Date.now());
   const methodName = r.method ? S.methodMap[r.method]?.name : r.legacyName || '';
-  const tabs = r.mode === 'map' ? ['MAP DRAFT', ...r.games.map((g, i) => `MAP ${i + 1} · ${mapName(g.mapId)}`)] : null;
-  if (tabs && S.resultTab >= tabs.length) S.resultTab = 0;
   const fearless = r.method && S.methodMap[r.method]?.fearless;
-  return `
-    <section class="res-top">
-      <div class="res-title">
-        <h1>DRAFT <span class="accent">COMPLETE</span></h1>
-        <span class="muted small">${esc(methodName)}${r.series ? ' · ' + r.series.toUpperCase() : ''}${r.counts?.order && S.methodMap[r.method]?.usesOrder ? ' · ' + r.counts.order.toUpperCase() : ''} · ${date.toLocaleString('ja-JP')}</span>
-      </div>
-      <div class="res-actions">
-        <button class="btn btn-red btn-sm" data-r="all">全結果を一画面で表示</button>
-        ${r.id ? `<button class="btn btn-light btn-sm" data-r="link">結果URLをコピー</button>` : ''}
-        <button class="btn btn-ghost btn-sm" data-r="text">テキスト</button>
-        <button class="btn btn-ghost btn-sm" data-r="json">JSON</button>
-        ${inRoom && isHost() ? '<button class="btn btn-ghost btn-sm" data-r="lobby">ロビーに戻る</button>' : ''}
-        ${inRoom ? '<button class="btn btn-ghost btn-sm" data-r="leave">退出</button>' : '<a class="btn btn-ghost btn-sm" href="/" data-link>新しくルームを作る</a>'}
-      </div>
-    </section>
-    <div class="res-bar">
-      ${tabs ? `<nav class="res-tabs">${tabs.map((t, i) => `<button class="res-tab ${i === S.resultTab ? 'on' : ''}" data-tab="${i}">${esc(t)}</button>`).join('')}</nav>` : '<span></span>'}
-      ${r.agentGlobalBans.length ? `<div class="gbans res-gbans"><span class="label">${icon('global')} GLOBAL BAN</span>${r.agentGlobalBans.map((id) => `<span class="mini mini-ban" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}</div>` : ''}
-    </div>
-    <div id="res-pane">${resultPane(r)}</div>
-    ${fearless ? fearlessHtml(r) : ''}
-    ${inRoom && !isHost() ? '<p class="muted small center">ホストがロビーに戻すと、次のドラフトを始められます。</p>' : ''}`;
-}
-
-function mapDraftResultHtml(r) {
   const md = r.mapDraft;
   return `
-    <section class="res-maps">${md.maps
-      .map(
-        (mp, i) => `<div class="res-map ${mp.decider ? 'decider' : ''}">
-          ${mapImg(S.mapMap[mp.mapId], 'list', 'res-map-img')}
-          <div class="res-map-info"><span class="eyebrow">MAP ${i + 1}</span><b>${esc(mapName(mp.mapId))}</b>
-          <span>${mp.decider ? '<i class="tag tag-decider">DECIDER</i> 攻守ランダム' : `<i class="tag team-tag-${mp.pickedBy}">TEAM ${mp.pickedBy} PICK</i> 攻守: TEAM ${mp.sideChooser}`}</span>
-          <span class="muted small">TEAM A ${SIDE_JA[mp.startSides.A]} / TEAM B ${SIDE_JA[mp.startSides.B]}</span></div>
-        </div>`
-      )
-      .join('')}</section>
-    <section class="res-maplog"><h4>MAP BAN / PICK</h4><ol>${md.log
-      .map((a) => `<li class="team-${a.team}">${icon(a.type === 'side' ? 'side' : a.type)} TEAM ${a.team} ${a.type === 'side' ? `攻守: ${esc(mapName(a.mapId))} ${SIDE_JA[a.side]}` : `${a.type.toUpperCase()} ${esc(mapName(a.mapId))}`}${a.auto ? ' <i class="auto">AUTO</i>' : ''}</li>`)
-      .join('')}</ol>
-      ${r.mapGlobalBans.length ? `<p class="muted small">${icon('global')} Global Ban: ${r.mapGlobalBans.map(mapName).map(esc).join(', ')}</p>` : ''}</section>`;
+    <section class="res-top">
+      <div class="res-title"><h1>DRAFT <span class="accent">COMPLETE</span></h1></div>
+      <div class="res-actions">
+        <button class="btn btn-red btn-sm" data-r="shot">${icon('copy')}結果をスクショ保存</button>
+        <button class="btn btn-ghost btn-sm" data-r="text">テキストでコピー</button>
+        ${inRoom ? '<button class="btn btn-ghost btn-sm" data-r="lobby">ロビーに戻る</button><button class="btn btn-ghost btn-sm" data-r="leave">退出</button>' : '<a class="btn btn-ghost btn-sm" href="/" data-link>新しくルームを作る</a>'}
+      </div>
+    </section>
+    <div id="res-capture" class="res-capture">
+      <header class="rc-head">
+        <div class="rc-teams"><span class="team-side rc-A">TEAM A</span><b>${esc(r.teamNames.A)}</b><span class="rc-vs">VS</span><b>${esc(r.teamNames.B)}</b><span class="team-side rc-B">TEAM B</span></div>
+        <div class="rc-meta">${esc(methodName)}${r.series ? ' · ' + r.series.toUpperCase() : ''}${r.counts?.order && S.methodMap[r.method]?.usesOrder ? ' · ' + r.counts.order.toUpperCase() : ''} · ${date.toLocaleString('ja-JP')}</div>
+      </header>
+      ${
+        r.agentGlobalBans.length || r.mapGlobalBans.length || md
+          ? `<div class="rc-strip">
+        ${r.agentGlobalBans.length ? `<span class="rc-label">${icon('global')} AGENT GLOBAL BAN</span>${r.agentGlobalBans.map((id) => `<span class="mini mini-ban" title="${esc(agentName(id))}">${agentImg(S.agentMap[id], 'icon')}</span>`).join('')}` : ''}
+        ${md ? `<span class="rc-label">${icon('map')} MAP DRAFT</span>${md.log.filter((a) => a.type !== 'side').map((a) => `<span class="ov-md ${a.type} team-${a.team}">${icon(a.type)}${a.team} ${esc(mapName(a.mapId))}</span>`).join('')}<span class="ov-md decider">DECIDER ${esc(mapName(md.maps.at(-1).mapId))}</span>` : ''}
+        ${r.mapGlobalBans.length ? `<span class="rc-label">${icon('global')} MAP GLOBAL BAN</span>${r.mapGlobalBans.map((id) => `<span class="tag rc-gbmap">${esc(mapName(id))}</span>`).join('')}` : ''}
+      </div>`
+          : ''
+      }
+      ${r.games.map((g) => `<div class="rc-game">${gameHtml(r, g)}</div>`).join('')}
+      ${fearless ? fearlessHtml(r) : ''}
+      <p class="rc-foot">V Dra · ${location.host}</p>
+    </div>`;
 }
 
 function fearlessHtml(r) {
@@ -1786,33 +1768,122 @@ function fearlessHtml(r) {
   return `<section class="fearless-hist"><h4>FEARLESS 使用済みエージェント履歴</h4>${rows}</section>`;
 }
 
+// ---- full-length screenshot of the results (not only the visible part)
+async function toDataUrl(url) {
+  try {
+    const res = await fetch(url, { mode: 'cors', cache: 'force-cache' });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => resolve(null);
+      fr.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+async function inlineFontsCss() {
+  // Latin display fonts only (Japanese falls back to the system font in the image)
+  try {
+    const cssUrl = 'https://fonts.googleapis.com/css2?family=Anton&family=Barlow+Condensed:wght@600;700&display=swap';
+    let css = await (await fetch(cssUrl)).text();
+    const urls = [...new Set([...css.matchAll(/url\((https:[^)]+)\)/g)].map((x) => x[1]))];
+    for (const u of urls) {
+      const d = await toDataUrl(u);
+      if (d) css = css.split(u).join(d);
+    }
+    return css;
+  } catch {
+    return '';
+  }
+}
+async function captureResult() {
+  const src = $('#res-capture');
+  if (!src || S.capturing) return;
+  S.capturing = true;
+  toast('画像を作成しています…', 'info', 1800);
+  try {
+    const w = Math.ceil(src.scrollWidth);
+    const h = Math.ceil(src.scrollHeight);
+    const clone = src.cloneNode(true);
+    await Promise.all(
+      [...clone.querySelectorAll('img')].map(async (img) => {
+        const d = await toDataUrl(img.getAttribute('src'));
+        img.removeAttribute('onerror');
+        img.removeAttribute('loading');
+        if (d) img.setAttribute('src', d);
+        else img.replaceWith(Object.assign(document.createElement('span'), { className: 'ag-fallback ' + img.className, textContent: initials(img.alt) }));
+      })
+    );
+    await Promise.all(
+      [...clone.querySelectorAll('[style*="url("]')].map(async (el) => {
+        const st = el.getAttribute('style');
+        const mm = st.match(/url\(['"]?([^'")]+)['"]?\)/);
+        if (!mm) return;
+        const d = await toDataUrl(mm[1]);
+        el.setAttribute('style', d ? st.replace(mm[1], d) : st.replace(/url\([^)]*\)/g, 'none'));
+      })
+    );
+    let css = await (await fetch('/style.css')).text();
+    css = css.replace(/:root\s*\{/, ':root, .capture-root {');
+    css += await inlineFontsCss();
+    css += '*{animation:none!important;transition:none!important}.res-card,.res-cards>*{opacity:1!important;transform:none!important}';
+    const xmlCss = css.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const body = new XMLSerializer().serializeToString(clone);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><foreignObject x="0" y="0" width="${w}" height="${h}"><div xmlns="http://www.w3.org/1999/xhtml" class="capture-root" style="width:${w}px;height:${h}px;background:#0f1923;color:#ece8e1;font-family:'Noto Sans JP',system-ui,sans-serif;font-size:15px;line-height:1.55"><style>${xmlCss}</style>${body}</div></foreignObject></svg>`;
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    });
+    const scale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = w * scale;
+    canvas.height = h * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#0f1923';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('blob');
+    const name = `vdra-result-${S.room?.resultId || Date.now()}.png`;
+    const file = new File([blob], name, { type: 'image/png' });
+    if (navigator.canShare?.({ files: [file] }) && /iPhone|iPad|Android/i.test(navigator.userAgent)) {
+      await navigator.share({ files: [file], title: 'V Dra ドラフト結果' }).catch(() => {});
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }
+    toast('スクショを保存しました', 'ok');
+  } catch (e) {
+    console.warn('capture failed', e);
+    toast('このブラウザでは画像を作成できませんでした。ブラウザのスクリーンショット機能をご利用ください', 'error', 4000);
+  } finally {
+    S.capturing = false;
+  }
+}
+
 function bindResult(r) {
   const app = $('#app');
   const on = (k, fn) => {
     const b = app.querySelector(`[data-r="${k}"]`);
     if (b) b.onclick = fn;
   };
-  on('link', () => copyText(`${location.origin}/r/${r.id}`, '結果URLをコピーしました'));
+  on('shot', captureResult);
   on('text', () => copyText(resultText(r), '結果をテキストでコピーしました'));
-  on('json', () => {
-    const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `vdra-result-${r.id || Date.now()}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  on('lobby', () => {
+    // only this viewer goes back; nobody else is moved
+    S.localLobby = true;
+    render();
   });
-  on('lobby', () => act({ type: 'backToLobby' }));
   on('leave', leaveRoom);
-  on('all', () => openOverview(r));
-  $$('[data-tab]', app).forEach(
-    (b) =>
-      (b.onclick = () => {
-        S.resultTab = Number(b.dataset.tab);
-        $$('[data-tab]', app).forEach((x) => x.classList.toggle('on', x === b));
-        $('#res-pane').innerHTML = resultPane(r);
-      })
-  );
 }
 
 let roomResultCache = null;

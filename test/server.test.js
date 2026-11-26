@@ -57,6 +57,12 @@ class Client {
     });
   }
   async act(action, actionId) {
+    if (action?.type === 'start' && this.peers) {
+      for (const c of this.peers) await c.raw_act({ type: 'setReady', ready: true }); // captains get READY, others ignored
+    }
+    return this.raw_act(action, actionId);
+  }
+  async raw_act(action, actionId) {
     const res = await fetch(`${this.base}/api/rooms/${this.roomId}/action`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -83,6 +89,7 @@ async function makeRoom(base, n = 10) {
   }
   for (const [i, c] of clients.entries()) await c.act({ type: 'setTeam', team: i % 2 ? 'B' : 'A' });
   await clients[0].until((s) => s.order.A.length + s.order.B.length === n);
+  for (const c of clients) c.peers = clients;
   return { roomId: created.roomId, clients };
 }
 
@@ -235,7 +242,7 @@ test('simultaneous clicks: only one selection applies per step; retries are idem
   try {
     const { clients } = await makeRoom(base, 4);
     const host = clients[0];
-    await host.act({ type: 'updateSettings', settings: { method: 'ban', timer: 0 } });
+    await host.act({ type: 'updateSettings', settings: { method: 'ban', timer: 0, hostOverride: true } });
     await host.act({ type: 'start' });
     await host.until((s) => s.status === 'drafting');
     const reqs = [];
@@ -293,7 +300,7 @@ test('timer expiry auto-resolves; restart restores a map series in progress', as
   const { roomId, clients } = await makeRoom(base, 2);
   const host = clients[0];
   const { maps } = await (await fetch(`${base}/api/maps`)).json();
-  await host.act({ type: 'updateSettings', settings: { mode: 'map', series: 'bo3', method: 'blind_ban', timer: 15, mapGlobalBans: maps.slice(0, maps.length - 7).map((m) => m.id) } });
+  await host.act({ type: 'updateSettings', settings: { mode: 'map', series: 'bo3', method: 'blind_ban', timer: 15, hostOverride: true, mapGlobalBans: maps.slice(0, maps.length - 7).map((m) => m.id) } });
   await host.act({ type: 'start' });
   await host.until((s) => s.status === 'drafting');
   app.rooms.get(roomId).room.match.deadline = Date.now() + 150;

@@ -50,7 +50,7 @@ export function defaultSettings() {
     blindBanCount: COUNT_SETTINGS.blindBanCount.def,
     blindEnemyBanCount: COUNT_SETTINGS.blindEnemyBanCount.def,
     timer: 30,
-    hostOverride: true,
+    hostOverride: false, // host acting for every turn is opt-in
     teamNames: { A: '', B: '' }, // empty = not entered; VORTEX / OBSIDIAN are applied at start
     agentGlobalBans: [],
     mapGlobalBans: [],
@@ -72,6 +72,7 @@ export function createRoom({ id, hostId, hostName, now }) {
     match: null,
     resultId: null,
     history: [],
+    ready: { A: false, B: false }, // captains' READY; both are required before the host can start
   };
   addPlayer(room, { id: hostId, name: hostName, now });
   return room;
@@ -79,7 +80,10 @@ export function createRoom({ id, hostId, hostName, now }) {
 
 // Upgrade a room saved by the previous version (schema 1: single `draft`, old system ids).
 export function migrateRoom(room) {
-  if (room.schema === 2) return room;
+  if (room.schema === 2) {
+    room.ready ||= { A: false, B: false };
+    return room;
+  }
   const old = room.settings || {};
   const s = defaultSettings();
   s.timer = TIMER_OPTIONS.includes(old.timer) ? old.timer : 30;
@@ -96,6 +100,7 @@ export function migrateRoom(room) {
   room.match = null;
   room.status = 'lobby';
   room.schema = 2;
+  room.ready = { A: false, B: false };
   return room;
 }
 
@@ -135,6 +140,10 @@ function setPlayerTeam(room, pid, team) {
 }
 
 const isHost = (room, pid) => room.hostId === pid;
+// READY is withdrawn whenever the teams or the rules change, so captains always agree on the final setup.
+const resetReady = (room) => {
+  room.ready = { A: false, B: false };
+};
 const requireHost = (room, pid) => {
   if (!isHost(room, pid)) fail('NOT_HOST', 'ホストのみ操作できます');
 };
@@ -698,13 +707,23 @@ export function autoResolve(room, ctx) {
   for (const t of TEAMS) {
     const side = p[t];
     if (side.done) continue;
+    const tent = side.tentative || {};
     if (p.type === 'pick') {
       side.sel.forEach((x, idx) => {
         if (x) return;
         const own = side.sel.filter(Boolean).map((y) => y.agentId);
+        // a selected-but-not-locked agent wins; otherwise fully random
+        if (tent[idx] && !agentError(m, g, t, 'pick', tent[idx], { ownPending: own })) {
+          side.sel[idx] = { agentId: tent[idx], by: null, auto: true, at: now };
+          return;
+        }
         const pool = validAgentsFor(m, g, t, 'pick', ctx.agentIds, own);
         if (pool.length) side.sel[idx] = { agentId: pool[Math.floor(random() * pool.length)], by: null, auto: true, at: now };
       });
+    } else if (tent.ban) {
+      const own = side.sel.filter(Boolean).map((y) => y.agentId);
+      const idx = side.sel.indexOf(null);
+      if (idx >= 0 && !agentError(m, g, t, 'ban', tent.ban, { ownPending: own })) side.sel[idx] = { agentId: tent.ban, by: null, auto: true, at: now };
     }
     side.done = true;
     side.doneAt = now;
@@ -733,7 +752,9 @@ export function applyAction(room, pid, action, ctx) {
       requireLobby(room);
       const target = action.target ?? pid;
       if (target !== pid) requireHost(room, pid);
+      const before = room.players[target]?.team;
       setPlayerTeam(room, target, action.team ?? null);
+      if (before !== room.players[target]?.team) resetReady(room);
       touch(room, now);
       return { changed: true };
     }
@@ -756,6 +777,7 @@ export function applyAction(room, pid, action, ctx) {
       const j = i + (action.dir === 'up' ? -1 : 1);
       if (j < 0 || j >= arr.length) return { changed: false };
       [arr[i], arr[j]] = [arr[j], arr[i]];
+      resetReady(room);
       touch(room, now);
       return { changed: true };
     }
@@ -772,6 +794,7 @@ export function applyAction(room, pid, action, ctx) {
         room.players[id].team = team;
         room.order[team].push(id);
       });
+      resetReady(room);
       touch(room, now);
       return { changed: true };
     }
@@ -779,6 +802,7 @@ export function applyAction(room, pid, action, ctx) {
       requireHost(room, pid);
       if (action.target === pid) fail('BAD_TARGET', '自分はキックできません');
       if (!room.players[action.target]) fail('NO_PLAYER', 'プレイヤーが見つかりません');
+      if (room.players[action.target].team && inLobby(room)) resetReady(room);
       removePlayer(room, action.target);
       touch(room, now);
       return { changed: true, removed: action.target };
@@ -786,6 +810,7 @@ export function applyAction(room, pid, action, ctx) {
     case 'leave': {
       // The last player leaving deletes the room.
       if (Object.keys(room.players).length <= 1) return { changed: true, deleteRoom: true, removed: pid };
+      if (room.players[pid].team && inLobby(room)) resetReady(room);
       removePlayer(room, pid); // also hands the host role over when needed
       touch(room, now);
       return { changed: true, removed: pid };
@@ -801,13 +826,24 @@ export function applyAction(room, pid, action, ctx) {
       requireLobby(room);
       requireHost(room, pid);
       updateSettings(room, action.settings || {}, ctx);
+      resetReady(room);
+      touch(room, now);
+      return { changed: true };
+    }
+    case 'setReady': {
+      requireLobby(room);
+      const team = room.players[pid].team;
+      if (!team || room.order[team][0] !== pid) fail('NOT_CAPTAIN', 'READYはチームのキャプテンのみ操作できます');
+      room.ready[team] = !!action.ready;
       touch(room, now);
       return { changed: true };
     }
     case 'start': {
       requireHost(room, pid);
       requireLobby(room);
+      if (!room.ready?.A || !room.ready?.B) fail('NOT_READY', '両チームのキャプテンがREADYになると開始できます');
       startMatch(room, ctx);
+      resetReady(room);
       touch(room, now);
       return { changed: true };
     }
@@ -824,6 +860,22 @@ export function applyAction(room, pid, action, ctx) {
         room.match.preview = id ? { key: st.key, agentId: id, by: pid } : null;
       } else return { changed: false };
       return { changed: true, light: true }; // not persisted, no version bump
+    }
+    case 'simPreview': {
+      // a not-yet-locked choice in a simultaneous step; only the own team ever sees it
+      if (room.status !== 'drafting') return { changed: false };
+      const st = currentStep(room);
+      if (!st || st.kind !== 'sim' || action.key !== st.key) return { changed: false };
+      const team = action.team;
+      const slot = st.type === 'pick' ? Number(action.slot) : 'ban';
+      if ((team !== 'A' && team !== 'B') || !canActSim(room, pid, st, team, st.type === 'pick' ? slot : null)) return { changed: false };
+      const id = action.agentId ?? null;
+      if (id && !ctx.agentIds.includes(id)) return { changed: false };
+      const side = curGame(room.match).pending[team];
+      side.tentative ||= {};
+      if (id) side.tentative[slot] = id;
+      else delete side.tentative[slot];
+      return { changed: true, light: true };
     }
     case 'select': {
       if (room.status === 'paused') fail('PAUSED', '一時停止中です');

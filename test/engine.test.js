@@ -10,7 +10,10 @@ const AGENTS = ['astra', 'breach', 'brimstone', 'chamber', 'clove', 'cypher', 'd
 const MAPS = ['abyss', 'ascent', 'bind', 'breeze', 'corrode', 'fracture', 'haven', 'icebox', 'lotus', 'pearl', 'split', 'sunset'];
 let t = 1000;
 const ctx = (extra = {}) => ({ now: (t += 10), agentIds: AGENTS, mapIds: MAPS, ...extra });
-const act = (room, pid, a, extra) => applyAction(room, pid, a, ctx(extra));
+const act = (room, pid, a, extra) => {
+  if (a?.type === 'start') room.ready = { A: true, B: true }; // captains READY (tested separately)
+  return applyAction(room, pid, a, ctx(extra));
+};
 
 // host 'h' + 9 players; even -> A, odd -> B (perTeam players each)
 function setup(settings = {}, perTeam = 5) {
@@ -451,4 +454,45 @@ test('migrates rooms saved by the previous version', () => {
   assert.equal(old.settings.timer, 45);
   assert.deepEqual(old.settings.teamNames, { A: '', B: 'Team K' });
   assert.equal(old.draft, undefined);
+});
+
+test('READY: only captains toggle it, both required to start, reset on team / rule changes', () => {
+  const room = setup({});
+  assert.throws(() => applyAction(room, 'p2', { type: 'setReady', ready: true }, ctx()), /キャプテン/); // p2 = A member
+  applyAction(room, 'h', { type: 'setReady', ready: true }, ctx()); // A captain
+  assert.throws(() => applyAction(room, 'h', { type: 'start' }, ctx()), /READY/);
+  applyAction(room, 'p1', { type: 'setReady', ready: true }, ctx()); // B captain
+  applyAction(room, 'p1', { type: 'setReady', ready: false }, ctx()); // can withdraw
+  assert.throws(() => applyAction(room, 'h', { type: 'start' }, ctx()), /READY/);
+  applyAction(room, 'p1', { type: 'setReady', ready: true }, ctx());
+  applyAction(room, 'h', { type: 'updateSettings', settings: { order: 'snake' } }, ctx());
+  assert.deepEqual(room.ready, { A: false, B: false });
+  applyAction(room, 'h', { type: 'setReady', ready: true }, ctx());
+  applyAction(room, 'p1', { type: 'setReady', ready: true }, ctx());
+  applyAction(room, 'h', { type: 'start' }, ctx());
+  assert.equal(room.status, 'drafting');
+  assert.deepEqual(room.ready, { A: false, B: false });
+});
+
+test('host override is off by default', () => {
+  const room = createRoom({ id: 'X', hostId: 'h', hostName: 'H', now: t });
+  assert.equal(room.settings.hostOverride, false);
+});
+
+test('timeout keeps a selected (not locked) agent: sequential and simultaneous', () => {
+  let room = setup({ method: 'normal' });
+  act(room, 'h', { type: 'start' });
+  act(room, 'h', { type: 'preview', id: 'sova' });
+  autoResolve(room, ctx());
+  assert.equal(curGame(room.match).actions[0].agentId, 'sova');
+  room = setup({ method: 'blind_ban', blindBanCount: 2 });
+  act(room, 'h', { type: 'start' });
+  playUntilSim(room);
+  const st = currentStep(room);
+  const capB = room.match.captains.B;
+  act(room, capB, { type: 'simPreview', key: st.key, team: 'B', slot: 3, agentId: 'yoru' });
+  assert.ok(!JSON.stringify(viewFor(room, 'A', t)).includes('"yoru"'), 'tentative choice hidden from enemy');
+  autoResolve(room, ctx());
+  const res = buildResult(room, { id: 'R', now: t });
+  assert.equal(res.games[0].teams.B.picks[3].agentId, 'yoru');
 });
